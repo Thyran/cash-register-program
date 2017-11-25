@@ -1,0 +1,417 @@
+unit KassenUtils;
+
+interface
+
+uses
+  Classes, SysUtils, Dialogs;
+
+type
+  TVerkaeuferInfo = record
+    anzahlVerkaeufer: Integer;
+    offsetVerkaeufer: Integer;
+  end;
+
+  TKauf = class
+  private
+    number: Integer;
+    price: Real;
+  public
+    constructor Create(const nummer: Integer; const preis: Real);
+
+    property Nummer: Integer read number write number;
+    property Preis: Real read price write price;
+  end;
+  TRElement = class
+  private
+    element: TRElement;
+    content: TKauf;
+  public
+    constructor Create(const kauf: TKauf);
+
+    property Previous: TRElement read element write element;
+    property Kauf: TKauf read content write content;
+  end;
+  TRechnung = class
+  private
+    topElement: TRElement;
+  public
+    constructor Create(); overload;
+    constructor Create(const rechnung: String); overload;
+    constructor Create(const rechnung: TStrings); overload;
+
+    property Top: TRElement read topElement write topElement;
+
+    procedure push(const kauf: TKauf);
+    procedure pop();
+
+    function empty(): boolean;
+    function createString(): String;
+    function createStrings(): TStringlist;
+  end;
+  TKasse = class
+  private
+    kassenNummer: Integer;
+    total: Real;
+    anzKunden: Integer;
+    summary: TStringlist;
+  public
+    constructor Create(const nummer: Integer);
+
+    procedure buy(const rechnung: TRechnung; const server: boolean = false);
+    procedure createSummary(const server: boolean = false);
+
+    property Nummer: Integer read kassenNummer write kassenNummer;
+    property KassenStand: Real read total write total;
+    property Kunden: Integer read anzKunden write anzKunden;
+
+    property Zusammenfassung: TStringlist read summary;
+  end;
+
+function prepareMsgString(const msg: Integer): String;
+function formatNummer(const nummer: String; const stellen: Integer): String;
+function formatPreis(const preis: String; const stellen: Integer): String;
+
+procedure Split(const Delimiter: Char; const Str: string; ListOfStrings: TStrings);
+procedure flipList(var list: TStringlist);
+
+const
+  VERSION = '1.0';
+
+  MESSAGE_ID = '042';
+  TRENNSTRICH       = '-------------';
+  KASSE_LEERSTRICH  = '         ';
+  KASSE_TRENNSTRICH = '---------------------';
+  KASSE_LEER_START  = '      ';
+  KASSEN_NUMMER_STELLEN = 2;
+  KUNDEN_NUMMER_STELLEN = 3;
+  PREIS_PRE_STELLEN     = 3;
+  PREIS_POST_STELLEN    = 2;
+  PAUSE_MSEC = 30;
+
+  RBC_MAX_KUNDEN = 15;
+  RBC_MAX_PREIS = 200;
+
+  FILE_END = '.txt';
+  DATA_FILE = 'data' + FILE_END;
+  INIT_FILE = 'init' + FILE_END;
+  VERK_FILE = 'Verkäuferliste' + FILE_END;
+  KASSEN_FILE = 'Kassen' + FILE_END;
+  EVAL_FILE = 'Auswertung' + FILE_END;
+  KASSE_DIR_NAME = 'Kasse';
+  SERVER_DIR_NAME = 'Server';
+  BILLS_DIR_NAME = 'Bills';
+  BELEGE_DIR_NAME = 'Belege';
+  VERK_DIR_NAME = 'Verkäufer';
+  KASSE_DIR = KASSE_DIR_NAME + '/';
+  SERVER_DIR = SERVER_DIR_NAME + '/';
+  BILLS_DIR = BILLS_DIR_NAME + '/';
+  BELEGE_DIR = BELEGE_DIR_NAME + '/';
+  VERK_DIR = VERK_DIR_NAME + '/';
+  KASSEN_NUMMER_STR = 'Kassennummer';
+  KUNDEN_ANZAHL_STR = 'Kundenanzahl';
+  KASSENSTAND_STR = 'Kassenstand';
+  SERVER_IP_STR = 'Server-IP';
+  MAX_VERK_STR = 'Verkäuferanzahl';
+  MIN_VERK_STR = 'Startnummer';
+  KASSEN_ANZAHL_STR = 'Kassenanzahl';
+
+implementation
+
+uses KassenInit;
+
+function prepareMsgString(const msg: Integer): String;
+begin
+  result := MESSAGE_ID + ';' + IntToStr(msg) + ';';
+end;
+
+function formatNummer(const nummer: String; const stellen: Integer): String;
+var
+  help: String;
+  i: Integer;
+begin
+  help := '';
+  if length(nummer) < stellen then
+  begin
+    for i := length(nummer) to stellen -1 do
+      help := help + '0';
+    help := help + nummer;
+  end
+  else
+    help := nummer;
+  result := help;
+end;
+
+function formatPreis(const preis: String; const stellen: Integer): String;
+var
+  help: String;
+  kPos, i: Integer;
+begin
+  help := preis;
+  kPos := Pos(',', preis);
+
+  if not (kPos = 0) then
+  begin
+    if (length(help) - kPos < PREIS_POST_STELLEN) then
+      help := help + '0'
+    else if (length(help) - kPos > PREIS_POST_STELLEN) then
+      help := copy(help, 1, kPos + PREIS_POST_STELLEN);
+  end
+  else
+    help := help + ',00';
+
+  for i := 0 to PREIS_PRE_STELLEN - (length(help) -3) do
+    help := ' ' + help;
+
+  result := help;
+end;
+
+procedure Split(const Delimiter: Char; const Str: string; ListOfStrings: TStrings);
+begin
+  ListOfStrings.Clear;
+  ListOfStrings.Delimiter := Delimiter;
+  ListOfStrings.DelimitedText := Str;
+end;
+
+procedure flipList(var list: TStringlist);
+var
+  temp: String;
+  i: Integer;
+begin
+  for i := 0 to (list.Count div 2) -1 do
+  begin
+    temp := list.Strings[i];
+    list.Strings[i] := list.Strings[list.Count -1 - i];
+    list.Strings[list.Count -1 - i] := temp;
+  end;
+end;
+
+constructor TKauf.Create(const nummer: Integer; const preis: Real);
+begin
+  number := nummer;
+  price := preis;
+end;
+
+constructor TRElement.Create(const kauf: TKauf);
+begin
+  content := kauf;
+  element := nil;
+end;
+
+constructor TRechnung.Create();
+begin
+  topElement := nil;
+end;
+
+constructor TRechnung.Create(const rechnung: String);
+var
+  tmp: TStringlist;
+  i: Integer;
+  nummer: Integer;
+  preis: Real;
+begin
+  Create();
+
+  tmp := TStringlist.Create();
+  Split('/', rechnung, tmp);
+  flipList(tmp);
+
+  for i := 1 to tmp.Count -2 do
+  begin
+    nummer := StrToInt(copy(tmp.Strings[i], 0, 3));
+    preis := StrToFloat(copy(tmp.Strings[i], 5, length(tmp.Strings[i]) -3));
+
+    push(TKauf.Create(nummer, preis));
+  end;
+
+  tmp.Free();
+end;
+
+constructor TRechnung.Create(const rechnung: TStrings);
+var
+  i, nummer: Integer;
+  preis: Real;
+  tmp: TStringlist;
+begin
+  Create();
+
+  for i := 0 to rechnung.Count -1 do
+  begin
+    tmp := TStringlist.Create();
+    split(' ', rechnung.Strings[i], tmp);
+    nummer := StrToInt(tmp.Strings[0]);
+    preis := StrToFloat(copy(tmp.Strings[1], 0, length(tmp.Strings[1]) -1));
+    push(TKauf.Create(nummer, preis));
+    tmp.Free();
+  end;
+end;
+
+procedure TRechnung.push(const kauf: TKauf);
+var new: TRElement;
+begin
+  new := topElement;
+  topElement := TRElement.Create(kauf);
+  topElement.Previous := new;
+end;
+
+procedure TRechnung.pop();
+var last: TRElement;
+begin
+  if not empty then
+  begin
+    last := topElement;
+    topElement := last.Previous;
+    last.Free();
+  end;
+end;
+
+function TRechnung.empty(): boolean;
+begin
+  result := (topElement = nil);
+end;
+
+function TRechnung.createString(): String;
+var
+  help: String;
+  current: TRElement;
+begin
+  help := '/';
+  current := topElement;
+  while not (current = nil) do
+  begin
+    help := help + IntToStr(current.Kauf.Nummer) + ':' +
+            FloatToStr(current.Kauf.Preis) + '/';
+    current := current.Previous;
+  end;
+  result := help;
+end;
+
+function TRechnung.createStrings(): TStringlist;
+var
+  help: TStringlist;
+  current: TRElement;
+  total: Real;
+begin
+  help := TStringlist.Create();
+  current := topElement;
+  total := 0;
+  while not (current = nil) do
+  begin
+    help.Add(KASSE_LEER_START + formatNummer(IntToStr(current.Kauf.Nummer), KUNDEN_NUMMER_STELLEN) + KASSE_LEERSTRICH +
+      formatPreis(FloatToStr(current.Kauf.Preis), PREIS_PRE_STELLEN) + '€');
+    total := total + current.Kauf.Preis;
+    current := current.Previous;
+  end;
+  flipList(help);
+  help.Add(KASSE_LEER_START + KASSE_TRENNSTRICH);
+  help.Add('Ges' + KASSE_LEERSTRICH +
+    formatPreis(FloatToStr(total), PREIS_PRE_STELLEN) + '€');
+  result := help;
+end;
+
+constructor TKasse.Create(const nummer: Integer);
+begin
+  kassenNummer := nummer;
+  total := 0;
+  anzKunden := 0;
+  summary := TStringlist.Create();
+end;
+
+procedure TKasse.buy(const rechnung: TRechnung; const server: boolean = false);
+var
+  save: TStringlist;
+  preis: Real;
+begin
+  preis := 0;
+  save := TStringlist.Create();
+  inc(anzKunden);
+
+  while not rechnung.empty do
+  begin
+    save.Add(IntToStr(rechnung.Top.Kauf.Nummer) + ' : ' +
+             formatPreis(FloatToStr(rechnung.Top.Kauf.Preis), PREIS_PRE_STELLEN) +
+             '€');
+    preis := preis + rechnung.Top.Kauf.Preis;
+    rechnung.pop();
+  end;
+
+  flipList(save);
+  save.Add(TRENNSTRICH);
+  save.Add('Ges : ' + formatPreis(FloatToStr(preis), PREIS_PRE_STELLEN) + '€');
+  if server then
+  begin
+    if not directoryExists('Server') then
+      mkDir('Server');
+    if not directoryExists('Server/Kasse' + IntToStr(kassenNummer)) then
+      mkDir('Server/Kasse' + IntToStr(kassenNummer));
+    if not directoryExists('Server/Kasse' + IntToStr(kassenNummer) +
+                           '/Bills') then
+      mkDir('Server/Kasse' + IntToStr(kassenNummer) + '/Bills');
+    save.SaveToFile('Server/Kasse' + IntToStr(kassenNummer) + '/Bills/' +
+                    formatNummer(IntToStr(anzKunden), KUNDEN_NUMMER_STELLEN) + '.txt');
+  end
+  else
+  begin
+    if not directoryExists('Kasse') then
+      mkDir('Kasse');
+    if not directoryExists('Kasse/Bills') then
+      mkDir('Kasse/Bills');
+    save.SaveToFile('Kasse/Bills/' + formatNummer(IntToStr(anzKunden), KUNDEN_NUMMER_STELLEN) + '.txt');
+  end;
+
+  total := total + preis;
+end;
+
+procedure TKasse.createSummary(const server: boolean = false);
+var
+  i, j, anzBills: Integer;
+  tmp: TStringlist;
+begin
+  summary.Clear();
+  tmp := TStringlist.Create();
+
+  if server then
+  begin
+    try
+      init.loadInit('Server/Kasse' + IntToStr(kassenNummer) + '/data.txt');
+      anzBills := StrToInt(init.readFromInit('Kundenanzahl'));
+    except
+      anzBills := 0;
+    end;
+
+    for i := 1 to anzBills do
+      try
+        tmp.LoadFromFile('Server/Kasse' + IntToStr(kassenNummer) + '/Bills/' +
+          formatNummer(IntToStr(i), KUNDEN_NUMMER_STELLEN) + '.txt');
+        for j := 0 to tmp.Count -3 do
+          summary.Add(IntToStr(kassenNummer) + formatNummer(IntToStr(i), KUNDEN_NUMMER_STELLEN) + ';' + tmp.Strings[j]);
+      except
+        ShowMessage('Fehler bei der Zusammenfassung');
+      end;
+
+    summary.SaveToFile('Server/Kasse' + IntToStr(kassenNummer) + '.txt');
+  end
+  else
+  begin
+    try
+      init.loadInit('Kasse/data.txt');
+      anzBills := StrToInt(init.readFromInit('Kundenanzahl'));
+    except
+      anzBills := 0;
+    end;
+
+    for i := 1 to anzBills do
+      try
+        tmp.LoadFromFile('Kasse/Bills/' + formatNummer(IntToStr(i), KUNDEN_NUMMER_STELLEN) + '.txt');
+        for j := 0 to tmp.Count -3 do
+          summary.Add(IntToStr(kassenNummer) + formatNummer(IntToStr(i), KUNDEN_NUMMER_STELLEN) + ';' + tmp.Strings[j]);
+      except
+        ShowMessage('Fehler bei der Zusammenfassung');
+      end;
+
+    summary.SaveToFile('Kasse.txt');
+  end;
+
+  tmp.Free();
+end;
+
+end.

@@ -1,0 +1,63 @@
+unit randomBillCreator;
+
+interface
+
+uses
+  ExtCtrls, Classes, SysUtils;
+
+type
+  TRandomBillCreator = class
+  private
+    timer: TTimer;
+
+    procedure createRandomBill(Sender: TObject);
+  public
+    constructor Create();
+
+    procedure start();
+    procedure stop();
+  end;
+
+implementation
+
+uses MainUnit, KassePayUnit;
+
+constructor TRandomBillCreator.Create();
+begin
+  timer := TTimer.Create(nil);
+
+  timer.OnTimer := createRandomBill;
+  timer.Interval := 2000;
+  timer.Enabled := false;
+end;
+
+procedure TRandomBillCreator.createRandomBill(Sender: TObject);
+var
+  key: char;
+  i: Integer;
+begin
+  for i := 0 to random(15) do
+  begin
+    key := chr(13);
+    KasseFrame.Edit1.Text := IntToStr(random(300) + 200);
+    KasseFrame.Edit2.Text := IntToStr(random(200)) + ',' + IntToStr(random(100));
+    KasseFrame.Edit2KeyPress(nil, key);
+  end;
+  key := chr(32);
+  KasseFrame.Edit1KeyPress(nil, key);
+  sleep(5);
+  key := chr(32);
+  KasseFrame.payFrame.Edit2KeyPress(nil, key);
+end;
+
+procedure TRandomBillCreator.start();
+begin
+  timer.Enabled := true;
+end;
+
+procedure TRandomBillCreator.stop();
+begin
+  timer.Enabled := false;
+end;
+
+end.

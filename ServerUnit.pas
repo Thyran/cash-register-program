@@ -1,0 +1,831 @@
+unit ServerUnit;
+
+interface
+
+uses
+  Windows, Messages, SysUtils, Variants, Classes, Graphics, Controls, Forms,
+  Dialogs, ScktComp, KassenControlFrameUnit, KassenUtils, Menus, StdCtrls,
+  ComCtrls, ServerEvaluationUnit, ServerVerkaeuferSetupUnit, ExtCtrls;
+
+type
+  TServerMessage = (smENABLE_CLIENT = 0, smDISABLE_CLIENT = 1, smCONNECT = 2,
+                    smDISCONNECT = 3, smKASSENSTAND = 4,
+                    smENABLE_AUTO_CONNECT = 5, smDISABLE_AUTO_CONNECT = 6,
+                    smSEND_NUMMER = 7, smERROR = 8, smSEND_VENDOR_DATA = 9);
+
+  TServerFrame = class(TForm)
+    MainMenu1: TMainMenu;
+    Datei1: TMenuItem;
+    InitDateierstellen1: TMenuItem;
+    Log: TRichEdit;
+    Edit1: TEdit;
+    Auswertung1: TMenuItem;
+    KompletteAuswertung1: TMenuItem;
+    EinzelneAuswertung1: TMenuItem;
+    Setup1: TMenuItem;
+    Verkaeuferinfoseinstellen1: TMenuItem;
+    Beenden1: TMenuItem;
+    LadeVerkuferliste1: TMenuItem;
+    Drucker1: TMenuItem;
+    PrinterSetupDialog1: TPrinterSetupDialog;
+    procedure FormShow(Sender: TObject);
+    procedure InitDateierstellen1Click(Sender: TObject);
+    procedure FormActivate(Sender: TObject);
+    procedure LogKeyPress(Sender: TObject; var Key: Char);
+    procedure Edit1Enter(Sender: TObject);
+    procedure Edit1KeyPress(Sender: TObject; var Key: Char);
+    procedure LogEnter(Sender: TObject);
+    procedure KompletteAuswertung1Click(Sender: TObject);
+    procedure FormClose(Sender: TObject; var Action: TCloseAction);
+    procedure Verkaeuferinfoseinstellen1Click(Sender: TObject);
+    procedure Beenden1Click(Sender: TObject);
+    procedure LadeVerkuferliste1Click(Sender: TObject);
+    procedure Drucker1Click(Sender: TObject);
+  private
+    Server: TServerSocket;
+    evaluationForm: TEvaluationFrame;
+    vendorFrame: TVendorSetupFrame;
+    printerCheckTimer: TTimer;
+
+    kassenControl: Array of TKasseControl;
+    anzKassen: Integer;
+    verkaeuferInfo: TVerkaeuferInfo;
+
+    function checkKassen(kassenNummer: Integer): boolean;
+    function getKassenPos(kassenNummer: Integer): Integer;
+
+    procedure setup();
+    procedure loadData();
+    procedure saveData();
+    procedure createKassen();
+    procedure ClientConnect(Sender: TObject; Socket: TCustomWinSocket);
+    procedure ClientRead(Sender: TObject; Socket: TCustomWinSocket);
+    procedure ServerError(Sender: TObject; Socket: TCustomWinSocket;
+      ErrorEvent: TErrorEvent; var ErrorCode: Integer);
+    procedure MenuItemKasseClick(Sender: TObject);
+    procedure OnPrinterChecker(Sender: TObject);
+  public
+    procedure createSummary(const kassenNummer: Integer);
+    procedure ErrorDialogClose(const result: boolean;
+      const kassenNummer: Integer);
+    procedure closeBillFrame(const nummer: Integer);
+    procedure closeEvaluationFrame();
+    procedure closeVendorSetupFrame(const info: TVerkaeuferInfo);
+  end;
+
+const
+  SERVER_PORT = 10024;
+
+  sMessage: Array[TServerMessage] of Integer = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9);
+
+var
+  ServerFrame: TServerFrame;
+
+implementation
+
+{$R *.dfm}
+
+uses MainUnit, KassenInit, TextDrucker, PrinterControl, WinSpool;
+
+function GetConsoleOutput(Command : string;
+                          Output, Errors : TStringList) : Boolean;
+var
+  Buffer            : array[0..255] of Char;
+  CreationFlags     : DWORD;
+  NumberOfBytesRead : DWORD;
+  PipeErrorsRead    : THandle;
+  PipeErrorsWrite   : THandle;
+  PipeOutputRead    : THandle;
+  PipeOutputWrite   : THandle;
+  ProcessInfo       : TProcessInformation;
+  SecurityAttr      : TSecurityAttributes;
+  StartupInfo       : TStartupInfo;
+  Stream            : TMemoryStream;
+begin
+  //Initialisierung ProcessInfo
+  FillChar(ProcessInfo, SizeOf(TProcessInformation), 0);
+
+  //Initialisierung SecurityAttr
+  FillChar(SecurityAttr, SizeOf(TSecurityAttributes), 0);
+  SecurityAttr.nLength              := SizeOf(TSecurityAttributes);
+  SecurityAttr.bInheritHandle       := True;
+  SecurityAttr.lpSecurityDescriptor := nil;
+
+  //Pipes erzeugen
+  CreatePipe(PipeOutputRead, PipeOutputWrite, @SecurityAttr, 0);
+  CreatePipe(PipeErrorsRead, PipeErrorsWrite, @SecurityAttr, 0);
+
+  //Initialisierung StartupInfo
+  FillChar(StartupInfo, SizeOf(TStartupInfo), 0);
+  StartupInfo.cb          := SizeOf(TStartupInfo);
+  StartupInfo.hStdInput   := 0;
+  StartupInfo.hStdOutput  := PipeOutputWrite;
+  StartupInfo.hStdError   := PipeErrorsWrite;
+  StartupInfo.wShowWindow := SW_HIDE;
+  StartupInfo.dwFlags     := STARTF_USESHOWWINDOW or STARTF_USESTDHANDLES;
+
+  CreationFlags := CREATE_DEFAULT_ERROR_MODE or
+                   CREATE_NEW_CONSOLE or
+                   NORMAL_PRIORITY_CLASS;
+
+  // Folgende Zeile ist nur für Delphi ab 2009 erforderlich:
+  UniqueString(Command);
+
+  if CreateProcess(nil,
+                   PChar(Command),
+                   nil,
+                   nil,
+                   True,
+                   CreationFlags,
+                   nil,
+                   nil,
+                   StartupInfo,
+                   ProcessInfo) then
+  begin
+    Result := True;
+    //Write-Pipes schließen
+    CloseHandle(PipeOutputWrite);
+    CloseHandle(PipeErrorsWrite);
+
+    //Ausgabe Read-Pipe auslesen
+    Stream := TMemoryStream.Create;
+    try
+      while ReadFile(PipeOutputRead, Buffer, 255, NumberOfBytesRead, nil) do
+      begin
+        Stream.Write(Buffer, NumberOfBytesRead);
+      end;
+      Stream.Position := 0;
+      Output.LoadFromStream(Stream);
+    finally
+      Stream.Free;
+    end;
+    CloseHandle(PipeOutputRead);
+
+    //Fehler Read-Pipe auslesen
+    Stream := TMemoryStream.Create;
+    try
+      while ReadFile(PipeErrorsRead, Buffer, 255, NumberOfBytesRead, nil) do
+      begin
+        Stream.Write(Buffer, NumberOfBytesRead);
+      end;
+      Stream.Position := 0;
+      Errors.LoadFromStream(Stream);
+    finally
+      Stream.Free;
+    end;
+    CloseHandle(PipeErrorsRead);
+
+    WaitForSingleObject(ProcessInfo.hProcess, INFINITE);
+    CloseHandle(ProcessInfo.hProcess);
+  end
+  else
+  begin
+    Result := False;
+    CloseHandle(PipeOutputRead);
+    CloseHandle(PipeOutputWrite);
+    CloseHandle(PipeErrorsRead);
+    CloseHandle(PipeErrorsWrite);
+  end;
+end;
+
+procedure TServerFrame.FormShow(Sender: TObject);
+begin
+  setup();
+end;
+
+function TServerFrame.checkKassen(kassenNummer: Integer): boolean;
+var
+  i: Integer;
+  help: boolean;
+begin
+  help := false;
+  for i := 0 to length(kassenControl) -1 do
+    if (kassenNummer = kassenControl[i].Nummer) then
+      help := true;
+  result := help;;
+end;
+
+function TServerFrame.getKassenPos(kassenNummer: Integer): Integer;
+var
+  i, help: Integer;
+begin
+  help := -1;
+  for i := 0 to length(kassenControl) -1 do
+    if (kassenNummer = kassenControl[i].Nummer) then
+      help := i;
+  result := help;
+end;
+
+procedure TServerFrame.setup();
+begin
+  Server := TServerSocket.Create(self);
+  Server.Port := SERVER_PORT;
+  Server.OnClientConnect := ClientConnect;
+  Server.OnClientRead := ClientRead;
+  Server.OnClientError := ServerError;
+  Server.Open();
+
+  printerCheckTimer := TTimer.Create(self);
+  printerCheckTimer.Enabled := true;
+  printerCheckTimer.Interval := 20;
+  printerCheckTimer.OnTimer := OnPrinterChecker;
+
+  anzKassen := 0;
+  verkaeuferInfo.anzahlVerkaeufer := 0;
+  verkaeuferInfo.offsetVerkaeufer := 0;
+
+  loadData();
+  createKassen();
+
+  Log.Lines.Add('Setup erfolgreich');
+end;
+
+procedure TServerFrame.ClientConnect(Sender: TObject; Socket: TCustomWinSocket);
+begin
+
+end;
+
+procedure TServerFrame.ClientRead(Sender: TObject; Socket: TCustomWinSocket);
+var
+  i, cMsg, kassenNummer: Integer;
+  anzKunden: Integer;
+  mString, kString: String;
+  newItem: TMenuItem;
+begin
+  for i := 0 to Server.Socket.ActiveConnections -1 do
+  begin
+    mString := Server.Socket.Connections[i].ReceiveText();
+    if not (mString = '') then
+    begin
+      if (copy(mString, 0, 3) = MESSAGE_ID) then
+      begin
+        mString := copy(mString, Pos(';', mString) +1, length(mString));
+        cMsg := StrToInt(copy(mString, 0, MESSAGE_NUMMER_STELLEN));
+        mString := copy(mString, Pos(';', mString) +1, length(mString));
+        case cMsg of
+          0: // CONNECT
+          begin
+            kassenNummer := StrToInt(copy(mString, 0, KASSEN_NUMMER_STELLEN));
+            mString := copy(mString, Pos(';', mString) +1, length(mString));
+            if not checkKassen(kassenNummer) then
+            begin
+              setLength(KassenControl, length(KassenControl) +1);
+              kassenControl[length(KassenControl) -1] :=
+                TKasseControl.Create(self);
+              kassenControl[length(KassenControl) -1].Name := 'KassenControl' +
+                IntToStr(kassenNummer);
+              kassenControl[length(KassenControl) -1].Parent := self;
+              kassenControl[length(KassenControl) -1].Nummer := kassenNummer;
+
+              if length(KassenControl) < 4 then
+              begin
+                kassenControl[length(KassenControl) -1].Left := 20;
+                kassenControl[length(KassenControl) -1].Top := 20 * kassenNummer +
+                  200 * (kassenNummer -1);
+              end
+              else if length(KassenControl) < 7 then
+              begin
+                kassenControl[length(KassenControl) -1].Left := 20 + 350 + 20;
+                kassenControl[length(KassenControl) -1].Top := 20 * (kassenNummer -3) +
+                  200 * (kassenNummer -4);
+              end;
+
+              newItem := TMenuItem.Create(EinzelneAuswertung1);
+              newItem.Name := 'MenuItemKasse' + IntToStr(kassenNummer);
+              newItem.Caption := 'Kasse' + IntToStr(kassenNummer);
+              newItem.Tag := kassenNummer;
+              newItem.OnClick := MenuItemKasseClick;
+              EinzelneAuswertung1.Add(newItem);
+            end;
+            kassenControl[getKassenPos(kassenNummer)].Socket := Socket;
+            kassenControl[getKassenPos(kassenNummer)].Control :=
+              kassenControl[getKassenPos(kassenNummer)].Control +
+              [csCONNECTED, csENABLED];
+            kassenControl[getKassenPos(kassenNummer)].load();
+            kassenControl[getKassenPos(kassenNummer)].save();
+
+            if anzKassen < 4 then
+            begin
+              self.ClientHeight := 20 * (anzKassen +1) + 200 * anzKassen;
+              self.ClientWidth := 730;
+
+              self.Log.Width := self.ClientWidth - 410;
+              self.Edit1.Width := self.ClientWidth -410;
+            end
+            else if anzKassen < 7 then
+            begin
+              self.ClientHeight := 20 * (4) + 200 * 3;
+              self.ClientWidth := 730 + 350 + 20;
+
+              self.Log.Width := self.ClientWidth - 410 - 20 - 350;
+              self.Edit1.Width := self.ClientWidth -410 - 20 - 350;
+            end;
+
+            self.Log.Height := self.ClientHeight - 75;
+            Log.Lines.Add('Kasse' + IntToStr(kassenNummer) + ' verbunden');
+          end;
+          1: // DISCONNECT
+          begin
+            kassenNummer := StrToInt(copy(mString, 0, KASSEN_NUMMER_STELLEN));
+            mString := copy(mString, Pos(';', mString) +1, length(mString));
+            if checkKassen(kassenNummer) then
+            begin
+              kassenControl[getKassenPos(kassenNummer)].Control :=
+                kassenControl[getKassenPos(kassenNummer)].Control -
+                [csCONNECTED, csENABLED, csAUTO_CONNECT];
+              kassenControl[getKassenPos(kassenNummer)].save();
+            end;
+            Log.Lines.Add('Kasse' + IntToStr(kassenNummer) + ' getrennt');
+          end;
+          2: // BUY
+          begin
+            kassenNummer := StrToInt(copy(mString, 0, KASSEN_NUMMER_STELLEN));
+            mString := copy(mString, Pos(';', mString) +1, length(mString));
+            kString := copy(mString, 0, Pos(';', mString) -1);
+            kassenControl[getKassenPos(kassenNummer)].Kasse.buy(
+              TRechnung.Create(kString), true);
+            drucken(TRechnung.Create(kString).createStrings(), 'Kasse' + formatNummer(IntToStr(kassenNummer), KASSEN_NUMMER_STELLEN) +
+              formatNummer(IntToStr(kassenControl[getKassenPos(kassenNummer)].Kasse.Kunden), KUNDEN_NUMMER_STELLEN));
+            kassenControl[getKassenPos(kassenNummer)].Socket.SendText(prepareMsgString(sMessage[smENABLE_CLIENT]));
+            kassenControl[getKassenPos(kassenNummer)].save();
+            Log.Lines.Add('Kasse' + IntToStr(kassenNummer) + ' Kauf erfolgreich');
+            Log.Lines.Add(kString);
+          end;
+          3: // DUMMY_CONNECT
+          begin
+            Socket.SendText(prepareMsgString(sMessage[smCONNECT]));
+            Log.Lines.Add('Dummy verbunden');
+          end;
+          4: // KASSENSTAND
+          begin
+          end;
+          5: // AUTO_CONNECT_ON
+          begin
+            kassenNummer := StrToInt(copy(mString, 0, KASSEN_NUMMER_STELLEN));
+            mString := copy(mString, Pos(';', mString) +1, length(mString));
+            kassenControl[getKassenPos(kassenNummer)].Control :=
+              kassenControl[getKassenPos(kassenNummer)].Control +
+              [csAUTO_CONNECT];
+            Log.Lines.Add('Kasse' + IntToStr(kassenNummer) + ' AutoConnect an');
+          end;
+          6: // AUTO_CONNECT_OFF
+          begin
+            kassenNummer := StrToInt(copy(mString, 0, KASSEN_NUMMER_STELLEN));
+            mString := copy(mString, Pos(';', mString) +1, length(mString));
+            kassenControl[getKassenPos(kassenNummer)].Control :=
+              kassenControl[getKassenPos(kassenNummer)].Control -
+              [csAUTO_CONNECT];
+            Log.Lines.Add('Kasse' + IntToStr(kassenNummer) + ' AutoConnect aus');
+          end;
+          7: // REGISTER
+          begin
+            loadData();
+            inc(anzKassen);
+            saveData();
+            Socket.SendText(prepareMsgString(sMessage[smSEND_NUMMER]) +
+                            formatNummer(IntToStr(anzKassen),
+                            KASSEN_NUMMER_STELLEN) + ';');
+            Log.Lines.Add('Neue Kasse registriert: Nummer ' + IntToStr(anzKassen));
+          end;
+          8: // SEND_KUNDEN
+          begin
+            kassenNummer := StrToInt(copy(mString, 0, KASSEN_NUMMER_STELLEN));
+            mString := copy(mString, Pos(';', mString) +1, length(mString));
+            anzKunden := StrToInt(copy(mString, 0, KUNDEN_NUMMER_STELLEN));
+            if not (kassenControl[getKassenPos(kassenNummer)].Kasse.Kunden =
+              anzKunden) then
+            begin
+              kassenControl[getKassenPos(kassenNummer)].errorMessage(
+                'Fehler bei den Kunden');
+              Log.Lines.Add('Kasse' + IntToStr(kassenNummer) + ' Fehler bei Kunden');
+              Log.Lines.Add('Sende Fehlermeldung');
+            end
+            else
+            begin
+              kassenControl[getKassenPos(kassenNummer)].Socket.SendText(
+                prepareMsgString(sMessage[smENABLE_CLIENT]));
+              sleep(PAUSE_MSEC);
+              kassenControl[getKassenPos(kassenNummer)].Socket.SendText(prepareMsgString(sMessage[smSEND_VENDOR_DATA]) +
+                formatNummer(IntToStr(verkaeuferInfo.anzahlVerkaeufer), KUNDEN_NUMMER_STELLEN) + '/' +
+                formatNummer(IntToStr(verkaeuferInfo.offsetVerkaeufer), KUNDEN_NUMMER_STELLEN) + ';');
+            end;
+          end;
+          9: // INC_KASSENSTAND
+          begin
+            kassenNummer := StrToInt(copy(mString, 0, KASSEN_NUMMER_STELLEN));
+            mString := copy(mString, Pos(';', mString) +1, length(mString));
+            mString := copy(mString, 1, Pos(';', mString) -1);
+            kassenControl[getKassenPos(kassenNummer)].Kasse.KassenStand :=
+              kassenControl[getKassenPos(kassenNummer)].Kasse.KassenStand + StrToFloat(mString);
+          end;
+        end;
+      end;
+    end;
+  end;
+end;
+
+procedure TServerFrame.ServerError(Sender: TObject; Socket: TCustomWinSocket;
+  ErrorEvent: TErrorEvent; var ErrorCode: Integer);
+begin
+  ErrorCode := 0;
+end;
+
+procedure TServerFrame.ErrorDialogClose(const result: boolean;
+  const kassenNummer: Integer);
+begin
+  if result then
+    kassenControl[getKassenPos(kassenNummer)].removeError();
+end;
+
+procedure TServerFrame.InitDateierstellen1Click(Sender: TObject);
+var
+  output, errors: TStringlist;
+begin
+  output := TStringlist.Create();
+  errors := TStringlist.Create();
+
+  getConsoleOutput('cmd /c ipconfig', output, errors);
+
+  init.writeInInit(SERVER_IP_STR, copy(Output.Strings[10],
+                   Length(Output.Strings[10]) -13, 14));
+  init.saveInit(INIT_FILE);
+end;
+
+procedure TServerFrame.FormActivate(Sender: TObject);
+var
+  i: Integer;
+begin
+  edit1.SetFocus();
+
+  if assigned(evaluationForm) then
+  begin
+    try
+      evaluationForm.SetFocus();
+      exit;
+    except
+    end;
+  end;
+
+  for i := 0 to length(kassenControl) -1 do
+  begin
+    try
+      if kassenControl[i].checkErrorDialogOpen() then
+        kassenControl[i].focusErrorDialog();
+    except
+    end;
+  end;
+end;
+
+procedure TServerFrame.OnPrinterChecker(Sender: TObject);
+var
+  kasse: Integer;
+  jobStatus: JOB_INFO_1;
+begin
+  try
+    log.Lines.Add(IntToStr(listPrinterJobs().Count));
+    jobStatus := getFirstJobStatus();
+    log.Lines.Add('tested');
+    kasse := StrToInt(copy(jobStatus.pDocument, 1, 2));
+    case jobStatus.Status of
+      JOB_STATUS_PRINTED:
+        kassenControl[getKassenPos(kasse)].Socket.SendText(prepareMsgString(sMessage[smENABLE_CLIENT]));
+      JOB_STATUS_ERROR:
+        kassenControl[getKassenPos(kasse)].errorMessage('Fehler beim Druckvorgang des Dokumentes: ' + jobStatus.pDocument);
+      JOB_STATUS_PAPEROUT:
+        kassenControl[getKassenPos(kasse)].errorMessage('Kein Papier im Drucker');
+    end;
+  except
+  end;
+end;
+
+procedure TServerFrame.loadData();
+var i: Integer;
+begin
+  try
+    init.loadInit(SERVER_DIR + DATA_FILE);
+    anzKassen := StrToInt(init.readFromInit(KASSEN_ANZAHL_STR));
+    verkaeuferInfo.anzahlVerkaeufer := StrToInt(init.readFromInit(MAX_VERK_STR));
+    verkaeuferInfo.offsetVerkaeufer := StrToInt(init.readFromInit(MIN_VERK_STR));
+
+    for i := 0 to length(KassenControl) -1 do
+      kassenControl[getKassenPos(i +1)].load();
+  except
+    anzKassen := 0;
+  end;
+end;
+
+procedure TServerFrame.saveData();
+var i: Integer;
+begin
+  init.loadInit(SERVER_DIR + DATA_FILE);
+  init.writeInInit(KASSEN_ANZAHL_STR, IntToStr(anzKassen));
+  init.writeInInit(MAX_VERK_STR, IntToStr(verkaeuferInfo.anzahlVerkaeufer));
+  init.writeInInit(MIN_VERK_STR, IntToStr(verkaeuferInfo.offsetVerkaeufer));
+
+  if not directoryExists(SERVER_DIR_NAME) then
+    mkDir(SERVER_DIR_NAME);
+  init.saveInit(SERVER_DIR + DATA_FILE);
+
+  for i := 0 to length(KassenControl) -1 do
+    kassenControl[getKassenPos(i +1)].save();
+end;
+
+procedure TServerFrame.createKassen();
+var
+  i: Integer;
+  newItem: TMenuItem;
+begin
+  setLength(KassenControl, anzKassen);
+  for i := 1 to anzKassen do
+  begin
+    kassenControl[i -1] := TKasseControl.Create(self);
+    kassenControl[i -1].Name := 'KassenControl' + IntToStr(i);
+    kassenControl[i -1].Parent := self;
+    kassenControl[i -1].Nummer := i;
+    if i < 4 then
+    begin
+      kassenControl[i -1].Left := 20;
+      kassenControl[i -1].Top := 20 * i +
+        200 * (i -1);
+    end
+    else if i < 7 then
+    begin
+      kassenControl[i -1].Left := 20 + 350 + 20;
+      kassenControl[i -1].Top := 20 * (i -3) +
+        200 * (i -1 -3);
+    end;
+    kassenControl[i -1].load();
+  end;
+
+  if anzKassen > 0 then
+  begin
+    if anzKassen < 4 then
+    begin
+      self.ClientHeight := 20 * (anzKassen +1) + 200 * anzKassen;
+      self.ClientWidth := 730;
+
+      self.Log.Width := self.ClientWidth - 410;
+      self.Edit1.Width := self.ClientWidth -410;
+    end
+    else if anzKassen < 7 then
+    begin
+      self.ClientHeight := 20 * (3 +1) + 200 * 3;
+      self.ClientWidth := 730 + 350 + 20;
+
+      self.Log.Width := self.ClientWidth - 410 - 20 - 350;
+      self.Edit1.Width := self.ClientWidth -410 - 20 - 350;
+    end;
+
+    self.Log.Height := self.ClientHeight - 75;
+  end;
+
+  for i := 0 to anzKassen -1 do
+  begin
+    newItem := TMenuItem.Create(EinzelneAuswertung1);
+    newItem.Name := 'MenuItemKasse' + IntToStr(i +1);
+    newItem.Caption := 'Kasse' + IntToStr(i +1);
+    newItem.Tag := i +1;
+    newItem.OnClick := MenuItemKasseClick;
+    EinzelneAuswertung1.Add(newItem);
+  end;
+end;
+
+procedure TServerFrame.LogKeyPress(Sender: TObject; var Key: Char);
+begin
+  key := chr(0);
+end;
+
+procedure TServerFrame.Edit1Enter(Sender: TObject);
+begin
+  edit1.Text := '';
+end;
+
+procedure TServerFrame.Edit1KeyPress(Sender: TObject; var Key: Char);
+var
+  command: String;
+  tmp: TStringlist;
+  nummer: Integer;
+begin
+  if key = chr(VK_RETURN) then
+  begin
+    if copy(edit1.Text, 0, 1) = '/' then
+    begin
+      tmp := TStringlist.Create();
+      command := copy(edit1.Text, 2, length(edit1.Text));
+      split(' ', command, tmp);
+      if AnsiLowerCase(tmp[0]) = 'disconnect' then
+      begin
+        if AnsiLowerCase(copy(tmp[1], 1, 5)) = 'kasse' then
+        begin
+          nummer := StrToInt(copy(tmp[1], 6, KASSEN_NUMMER_STELLEN));
+          try
+            kassenControl[getKassenPos(nummer)].Socket.SendText(prepareMsgString(sMessage[smDISCONNECT]));
+          except
+            Log.Lines.Add('Kasse' + IntToStr(nummer) + ' ist nicht verbunden');
+          end;
+        end
+        else
+          Log.Lines.Add('Bezeichner nicht definiert: ' + tmp[1]);
+      end
+      else if AnsiLowerCase(tmp[0]) = 'autoconnect' then
+      begin
+        if AnsiLowerCase(copy(tmp[1], 1, 5)) = 'kasse' then
+        begin
+          nummer := StrToInt(copy(tmp[1], 6, KASSEN_NUMMER_STELLEN));
+          if AnsiLowerCase(tmp[2]) = 'true' then
+            try
+              kassenControl[getKassenPos(nummer)].Socket.SendText(prepareMsgString(sMessage[smENABLE_AUTO_CONNECT]));
+              kassenControl[getKassenPos(nummer)].Control := kassenControl[getKassenPos(nummer)].Control + [csAUTO_CONNECT];
+            except
+              Log.Lines.Add('Kasse' + IntToStr(nummer) + ' ist nicht verbunden');
+            end
+          else if AnsiLowerCase(tmp[2]) = 'false' then
+            try
+              kassenControl[getKassenPos(nummer)].Socket.SendText(prepareMsgString(sMessage[smDISABLE_AUTO_CONNECT]));
+              kassenControl[getKassenPos(nummer)].Control := kassenControl[getKassenPos(nummer)].Control - [csAUTO_CONNECT];
+            except
+              Log.Lines.Add('Kasse' + IntToStr(nummer) + ' ist nicht verbunden');
+            end
+        end
+        else
+          Log.Lines.Add('Bezeichner nicht definiert: ' + tmp[1]);
+      end
+      else if AnsiLowerCase(tmp[0]) = 'enable' then
+      begin
+        if AnsiLowerCase(copy(tmp[1], 1, 5)) = 'kasse' then
+        begin
+          nummer := StrToInt(copy(tmp[1], 6, KASSEN_NUMMER_STELLEN));
+          if AnsiLowerCase(tmp[2]) = 'true' then
+            try
+              kassenControl[getKassenPos(nummer)].Socket.SendText(prepareMsgString(sMessage[smENABLE_CLIENT]));
+              kassenControl[getKassenPos(nummer)].Control := kassenControl[getKassenPos(nummer)].Control + [csENABLED];
+            except
+              Log.Lines.Add('Kasse' + IntToStr(nummer) + ' ist nicht verbunden');
+            end
+          else if AnsiLowerCase(tmp[2]) = 'false' then
+            try
+              kassenControl[getKassenPos(nummer)].Socket.SendText(prepareMsgString(sMessage[smDISABLE_CLIENT]));
+              kassenControl[getKassenPos(nummer)].Control := kassenControl[getKassenPos(nummer)].Control - [csENABLED];
+            except
+              Log.Lines.Add('Kasse' + IntToStr(nummer) + ' ist nicht verbunden');
+            end;
+        end
+        else
+          Log.Lines.Add('Bezeichner nicht definiert: ' + tmp[1]);
+      end
+      else if AnsiLowerCase(tmp[0]) = 'showbills' then
+      begin
+        if AnsiLowerCase(copy(tmp[1], 1, 5)) = 'kasse' then
+        begin
+          nummer := StrToInt(copy(tmp[1], 6, KASSEN_NUMMER_STELLEN));
+          try
+            kassenControl[getKassenPos(nummer)].openBillFrame();
+          except
+            Log.Lines.Add('Kasse' + IntToStr(nummer) + ' ist nicht verbunden');
+          end;
+        end
+        else
+          Log.Lines.Add('Bezeichner nicht definiert: ' + tmp[1]);
+      end
+      else if AnsiLowerCase(tmp[0]) = 'showtotal' then
+      begin
+        if AnsiLowerCase(copy(tmp[1], 1, 5)) = 'kasse' then
+        begin
+          nummer := StrToInt(copy(tmp[1], 6, KASSEN_NUMMER_STELLEN));
+          try
+            ShowMessage(FloatToStr(kassenControl[getKassenPos(nummer)].Kasse.KassenStand) + '€');
+          except
+            Log.Lines.Add('Kasse' + IntToStr(nummer) + ' ist nicht verbunden');
+          end;
+        end
+        else
+          Log.Lines.Add('Bezeichner nicht definiert: ' + tmp[1]);
+      end
+      else if AnsiLowerCase(tmp[0]) = 'evaluate' then
+      begin
+        if AnsiLowerCase(copy(tmp[1], 1, 5)) = 'kasse' then
+        begin
+          nummer := StrToInt(copy(tmp[1], 6, KASSEN_NUMMER_STELLEN));
+          try
+            kassenControl[getKassenPos(nummer)].Kasse.createSummary(true);
+          except
+          end;
+        end
+        else
+          Log.Lines.Add('Bezeichner nicht definiert: ' + tmp[1]);
+      end
+      else if AnsiLowerCase(tmp[0]) = 'evaluation' then
+      begin
+        if not assigned(evaluationForm) then
+          evaluationForm := TEvaluationFrame.Create(self);
+        evaluationFrame.AnzKassen := anzKassen;
+        evaluationForm.Show();
+      end
+      else
+      begin
+        Log.lines.Add('Kein Befehl vorhanden: ' + tmp.Strings[0]);
+      end;
+    end;
+    edit1.Text := '';
+    key := chr(0);
+  end;
+end;
+
+procedure TServerFrame.LogEnter(Sender: TObject);
+begin
+  edit1.SetFocus();
+end;
+
+procedure TServerFrame.closeBillFrame(const nummer: Integer);
+begin
+  kassenControl[getKassenPos(nummer)].closeBillFrame();
+end;
+
+procedure TServerFrame.MenuItemKasseClick(Sender: TObject);
+begin
+  kassenControl[getKassenPos((Sender as TMenuItem).Tag)].Kasse.createSummary(true);
+end;
+
+procedure TServerFrame.KompletteAuswertung1Click(Sender: TObject);
+begin
+  if not assigned(evaluationForm) then
+    Application.CreateForm(TEvaluationFrame, evaluationForm);
+  evaluationForm.AnzKassen := anzKassen;
+  evaluationForm.VerkaeuferInfo := verkaeuferInfo;
+  evaluationForm.Show();
+end;
+
+procedure TServerFrame.closeEvaluationFrame();
+begin
+  evaluationForm.Hide();
+end;
+
+procedure TServerFrame.createSummary(const kassenNummer: Integer);
+begin
+  kassenControl[getKassenPos(kassenNummer)].Kasse.createSummary(true);
+end;
+
+procedure TServerFrame.FormClose(Sender: TObject;
+  var Action: TCloseAction);
+begin
+  saveData();
+end;
+
+procedure TServerFrame.closeVendorSetupFrame(const info: TVerkaeuferInfo);
+var
+  i: Integer;
+begin
+  verkaeuferInfo := info;
+
+  try
+    for i := 0 to length(kassenControl) -1 do
+      kassenControl[getKassenPos(i + 1)].Socket.SendText(prepareMsgString(sMessage[smSEND_VENDOR_DATA]) +
+        formatNummer(IntToStr(verkaeuferInfo.anzahlVerkaeufer), KUNDEN_NUMMER_STELLEN) + '/' +
+        formatNummer(IntToStr(verkaeuferInfo.offsetVerkaeufer), KUNDEN_NUMMER_STELLEN) + ';');
+    saveData();
+  except
+  end;
+
+  if assigned(vendorFrame) then
+    vendorFrame.Hide();
+end;
+
+procedure TServerFrame.Verkaeuferinfoseinstellen1Click(Sender: TObject);
+begin
+  if not assigned(vendorFrame) then
+    vendorFrame := TVendorSetupFrame.Create(self);
+  vendorFrame.Parent := self;
+  vendorFrame.Left := 20;
+  vendorFrame.Top := 20;
+  vendorFrame.minVerk := verkaeuferinfo.offsetVerkaeufer;
+  vendorFrame.maxVerk := verkaeuferInfo.anzahlVerkaeufer;
+  vendorFrame.Show();
+end;
+
+procedure TServerFrame.Beenden1Click(Sender: TObject);
+begin
+  Close();
+end;
+
+procedure TServerFrame.LadeVerkuferliste1Click(Sender: TObject);
+var
+  tmp: TStringlist;
+begin
+  tmp := TStringlist.Create();
+  try
+    tmp.LoadFromFile(SERVER_DIR + VERK_FILE);
+
+    verkaeuferInfo.anzahlVerkaeufer := tmp.Count;
+    verkaeuferInfo.offsetVerkaeufer := StrToInt(copy(tmp[0], 1, 3));
+  except
+  end;
+
+  tmp.Free();
+end;
+
+procedure TServerFrame.Drucker1Click(Sender: TObject);
+begin
+  PrinterSetupDialog1.Execute();
+end;
+
+end.
