@@ -63,7 +63,6 @@ begin
   finally
     ClosePrinter(hPrinter);
   end;
-
   result := help;
   help.Free();
 end;

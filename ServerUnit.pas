@@ -28,6 +28,7 @@ type
     LadeVerkuferliste1: TMenuItem;
     Drucker1: TMenuItem;
     PrinterSetupDialog1: TPrinterSetupDialog;
+    drucken1: TMenuItem;
     procedure FormShow(Sender: TObject);
     procedure InitDateierstellen1Click(Sender: TObject);
     procedure FormActivate(Sender: TObject);
@@ -41,15 +42,17 @@ type
     procedure Beenden1Click(Sender: TObject);
     procedure LadeVerkuferliste1Click(Sender: TObject);
     procedure Drucker1Click(Sender: TObject);
+    procedure drucken1Click(Sender: TObject);
   private
     Server: TServerSocket;
     evaluationForm: TEvaluationFrame;
     vendorFrame: TVendorSetupFrame;
-    printerCheckTimer: TTimer;
+    //printerCheckTimer: TTimer;
 
     kassenControl: Array of TKasseControl;
     anzKassen: Integer;
     verkaeuferInfo: TVerkaeuferInfo;
+    print: boolean;
 
     function checkKassen(kassenNummer: Integer): boolean;
     function getKassenPos(kassenNummer: Integer): Integer;
@@ -63,7 +66,7 @@ type
     procedure ServerError(Sender: TObject; Socket: TCustomWinSocket;
       ErrorEvent: TErrorEvent; var ErrorCode: Integer);
     procedure MenuItemKasseClick(Sender: TObject);
-    procedure OnPrinterChecker(Sender: TObject);
+    //procedure OnPrinterChecker(Sender: TObject);
   public
     procedure createSummary(const kassenNummer: Integer);
     procedure ErrorDialogClose(const result: boolean;
@@ -225,10 +228,10 @@ begin
   Server.OnClientError := ServerError;
   Server.Open();
 
-  printerCheckTimer := TTimer.Create(self);
+  {printerCheckTimer := TTimer.Create(self);
   printerCheckTimer.Enabled := true;
   printerCheckTimer.Interval := 20;
-  printerCheckTimer.OnTimer := OnPrinterChecker;
+  printerCheckTimer.OnTimer := OnPrinterChecker;   }
 
   anzKassen := 0;
   verkaeuferInfo.anzahlVerkaeufer := 0;
@@ -237,6 +240,8 @@ begin
   loadData();
   createKassen();
 
+  print := true;
+  drucken1.Checked := true;
   Log.Lines.Add('Setup erfolgreich');
 end;
 
@@ -344,8 +349,9 @@ begin
             kString := copy(mString, 0, Pos(';', mString) -1);
             kassenControl[getKassenPos(kassenNummer)].Kasse.buy(
               TRechnung.Create(kString), true);
-            drucken(TRechnung.Create(kString).createStrings(), 'Kasse' + formatNummer(IntToStr(kassenNummer), KASSEN_NUMMER_STELLEN) +
-              formatNummer(IntToStr(kassenControl[getKassenPos(kassenNummer)].Kasse.Kunden), KUNDEN_NUMMER_STELLEN));
+            if print then
+              drucken(TRechnung.Create(kString).createStrings(), 'Kasse' + formatNummer(IntToStr(kassenNummer), KASSEN_NUMMER_STELLEN) +
+                formatNummer(IntToStr(kassenControl[getKassenPos(kassenNummer)].Kasse.Kunden), KUNDEN_NUMMER_STELLEN));
             kassenControl[getKassenPos(kassenNummer)].Socket.SendText(prepareMsgString(sMessage[smENABLE_CLIENT]));
             kassenControl[getKassenPos(kassenNummer)].save();
             Log.Lines.Add('Kasse' + IntToStr(kassenNummer) + ' Kauf erfolgreich');
@@ -476,7 +482,7 @@ begin
   end;
 end;
 
-procedure TServerFrame.OnPrinterChecker(Sender: TObject);
+{procedure TServerFrame.OnPrinterChecker(Sender: TObject);
 var
   kasse: Integer;
   jobStatus: JOB_INFO_1;
@@ -496,7 +502,7 @@ begin
     end;
   except
   end;
-end;
+end;   }
 
 procedure TServerFrame.loadData();
 var i: Integer;
@@ -826,6 +832,12 @@ end;
 procedure TServerFrame.Drucker1Click(Sender: TObject);
 begin
   PrinterSetupDialog1.Execute();
+end;
+
+procedure TServerFrame.drucken1Click(Sender: TObject);
+begin
+  print := not print;
+  drucken1.Checked := print;
 end;
 
 end.

@@ -67,6 +67,10 @@ object ServerFrame: TServerFrame
         Caption = 'Drucker'
         OnClick = Drucker1Click
       end
+      object drucken1: TMenuItem
+        Caption = 'drucken'
+        OnClick = drucken1Click
+      end
       object Beenden1: TMenuItem
         Caption = 'Beenden'
         OnClick = Beenden1Click

@@ -9,7 +9,7 @@ type
   TJobs  = array [0..1000] of JOB_INFO_1;
   PJobs = ^TJobs;
 
-function listPrinterJobs(): TStrings;
+//function listPrinterJobs(): TStrings;
 function getFirstJobStatus(): JOB_INFO_1;
 function SavePChar(p: PChar): PChar;
 
@@ -37,7 +37,7 @@ begin
     Result := p;
 end;
 
-function listPrinterJobs(): TStrings;
+{function listPrinterJobs(): TStrings;
 var
   hPrinter: THandle;
   bytesNeeded, numJobs, i: Cardinal;
@@ -61,11 +61,11 @@ begin
           [SavePChar(pJ^[i].pPrinterName), SavePChar(pJ^[i].pDocument),
           pJ^[i].Status, SavePChar(pJ^[i].pStatus)]));
   finally
-    ClosePrinter(hPrinter);
+    //ClosePrinter(hPrinter);
   end;
   result := help;
   help.Free();
-end;
+end;    }
 
 function getFirstJobStatus(): JOB_INFO_1;
 var

@@ -10,8 +10,7 @@ uses
   BillUnit in 'BillUnit.pas' {BillFrame},
   ServerEvaluationUnit in 'ServerEvaluationUnit.pas' {EvaluationFrame},
   ServerVerkaeuferSetupUnit in 'ServerVerkaeuferSetupUnit.pas' {VendorSetupFrame: TFrame},
-  TextDrucker in 'TextDrucker.pas',
-  PrinterControl in 'PrinterControl.pas';
+  TextDrucker in 'TextDrucker.pas';
 
 {$R *.res}
 
